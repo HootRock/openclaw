@@ -133,7 +133,7 @@ vi.mock("openclaw/plugin-sdk/webhook-ingress", async () => {
 
 vi.mock("./client.js", () => ({
   SYNOLOGY_CHAT_TEXT_CHUNK_LIMIT: 2_000,
-  sendMessage: vi.fn().mockResolvedValue(true),
+  sendMessage: vi.fn().mockResolvedValue({ messageIds: [] }),
   sendHostedFileUrl: vi.fn().mockResolvedValue({ status: "accepted" }),
   resolveLegacyWebhookNameToChatUserId: vi.fn().mockResolvedValue(undefined),
 }));

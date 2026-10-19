@@ -211,7 +211,9 @@ describe("Synology Chat TLS verification defaults", () => {
         if (refused) {
           await expect(sending).rejects.toBe(refusal);
         } else {
-          expect(await sending).toEqual(name === "sendMessage" ? true : { status: "accepted" });
+          expect(await sending).toEqual(
+            name === "sendMessage" ? { messageIds: [] } : { status: "accepted" },
+          );
         }
         expect(https.request).toHaveBeenCalledTimes(refused ? 0 : 1);
         if (!refused) {
@@ -288,7 +290,7 @@ describe("sendMessage", () => {
 
     const result = await sendText();
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ messageIds: [] });
     expect(vi.mocked(https.request)).toHaveBeenCalledTimes(2);
   });
 
@@ -302,7 +304,7 @@ describe("sendMessage", () => {
 
     const result = await sendText();
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ messageIds: [] });
     expect(vi.mocked(https.request)).toHaveBeenCalledTimes(1);
   });
 
@@ -406,7 +408,9 @@ describe("sendHostedFileUrl", () => {
 
     await vi.advanceTimersByTimeAsync(500);
     expect(requestedUrls()).toEqual([accountA, accountB, accountA, accountA]);
-    await expect(Promise.all(sends)).resolves.toEqual([true, true, true, true]);
+    await expect(Promise.all(sends)).resolves.toEqual(
+      Array.from({ length: 4 }, () => ({ messageIds: [] })),
+    );
   });
 });
 
