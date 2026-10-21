@@ -1,8 +1,6 @@
-import { once } from "node:events";
 // Covers outbound delivery core: hooks, queue cleanup, durable capability
 // checks, adapter sends, transcript mirroring, and payload outcomes.
 import fsPromises from "node:fs/promises";
-import * as http from "node:http";
 import path from "node:path";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
@@ -21,7 +19,6 @@ import * as mediaCapabilityModule from "../../media/read-capability.js";
 import type { PluginHookHandlerMap } from "../../plugins/hook-types.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import { loadBundledPluginFacade } from "../../test-utils/bundled-plugin-public-surface.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../../test-utils/channel-plugins.js";
 import { createInternalHookEventPayload } from "../../test-utils/internal-hook-event-payload.js";
 import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
@@ -2804,102 +2801,6 @@ describe("deliverOutboundPayloads", () => {
       reason: "adapter_returned_no_identity",
     });
   });
-
-  it.each([
-    {
-      name: "matched numeric post",
-      recipient: "123456",
-      postId: 25769804017,
-      expectedId: "25769804017",
-    },
-    {
-      name: "matched large string post",
-      recipient: "123456",
-      postId: "18446744073709551615",
-      expectedId: "18446744073709551615",
-    },
-    {
-      name: "unsafe numeric post",
-      recipient: "123456",
-      postId: 9007199254740992,
-      expectedId: undefined,
-    },
-    { name: "zero post", recipient: "123456", postId: 0, expectedId: undefined },
-    {
-      name: "different recipient",
-      recipient: "999999",
-      postId: 25769804017,
-      expectedId: undefined,
-    },
-  ])(
-    "confirms only usable recipient-matched Synology webhook identities: $name",
-    async ({ recipient, postId, expectedId }) => {
-      const { synologyChatPlugin } = await loadBundledPluginFacade<{
-        synologyChatPlugin: ChannelPlugin;
-      }>({
-        pluginId: "synology-chat",
-        artifactBasename: "api.ts",
-      });
-      setTestPlugin(synologyChatPlugin);
-      const uploads: unknown[] = [];
-      const server = http.createServer((req, res) => {
-        let body = "";
-        req.setEncoding("utf8");
-        req.on("data", (chunk: string) => {
-          body += chunk;
-        });
-        req.on("end", () => {
-          uploads.push(JSON.parse(new URLSearchParams(body).get("payload") ?? "null"));
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(
-            JSON.stringify({
-              success: true,
-              data: { succ: { user_id_post_map: { [recipient]: postId } } },
-            }),
-          );
-        });
-      });
-      server.listen(0, "127.0.0.1");
-      await once(server, "listening");
-      try {
-        const address = server.address();
-        if (!address || typeof address === "string") {
-          throw new Error("expected loopback address");
-        }
-        const onPayloadDeliveryOutcome = vi.fn();
-        const results = await deliverOutboundPayloads({
-          cfg: {
-            channels: {
-              "synology-chat": {
-                enabled: true,
-                token: "offline-loopback",
-                incomingUrl: `http://127.0.0.1:${address.port}/incoming`,
-              },
-            },
-          },
-          channel: "synology-chat",
-          to: "123456",
-          payloads: [{ text: "receipt proof" }],
-          skipQueue: true,
-          onPayloadDeliveryOutcome,
-        });
-        expect(uploads).toEqual([{ text: "receipt proof", user_ids: [123456] }]);
-        expect(results.map((result) => result.messageId)).toEqual(expectedId ? [expectedId] : []);
-        expect(onPayloadDeliveryOutcome).toHaveBeenCalledWith(
-          expect.objectContaining(
-            expectedId
-              ? { status: "sent" }
-              : { status: "suppressed", reason: "adapter_returned_no_identity" },
-          ),
-        );
-      } finally {
-        server.closeAllConnections();
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => (error ? reject(error) : resolve()));
-        });
-      }
-    },
-  );
 
   it("resets no-send disposition between chunked logical payloads", async () => {
     const onPayloadDeliveryOutcome = vi.fn();

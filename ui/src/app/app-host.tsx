@@ -13,7 +13,6 @@ import "../components/resizable-divider.ts";
 import type { AppSidebarElement } from "../components/app-sidebar.tsx";
 import type { CommandPaletteTargetDetail } from "../components/command-palette-contract.ts";
 import { askBrandLabel } from "../components/theme-brand-label.ts";
-import type { ThemeModeChangeDetail } from "../components/theme-mode-toggle.ts";
 import { i18n } from "../i18n/index.ts";
 import { normalizeAgentLabel } from "../lib/agents/display.ts";
 import { storedChatOutboxScopeKey } from "../lib/chat/outbox-store-scope.ts";
@@ -65,7 +64,6 @@ import {
   SIDEBAR_ATTENTION_ELEMENT,
   TERMINAL_PANEL_ELEMENT,
 } from "./lazy-custom-element.ts";
-import { createLazyRenderer } from "./lazy-renderer.ts";
 import { postNativeNavState, type NativeNavState } from "./native-nav-state.ts";
 import { resolveOnboardingMode } from "./onboarding-mode.ts";
 import { RouteElements, type RouteElementEvent } from "./route-elements.ts";
@@ -164,26 +162,6 @@ export class ShellOwner
   didConsiderNativeRouteRestore = false;
   pendingNativeNewSession = false;
   readonly settingsPreloadTimers = new Map<EventTarget, ReturnType<typeof globalThis.setTimeout>>();
-  // Settings navigation is needed only after entering the settings takeover.
-  // Keep its search, update-card, and sidebar rendering graph off the startup path.
-  readonly settingsSidebar = createLazyRenderer(() =>
-    import("../components/settings-sidebar-shell.tsx").then(
-      (module) => module.ShellSettingsSidebar,
-    ),
-  );
-  readonly debugOverlayFrame = createLazyRenderer(() =>
-    import("../pages/debug/debug-overlay-frame.ts").then(
-      (module) => module.renderPendingDebugOverlay,
-    ),
-  );
-
-  // Lazy: the pairing modal is opened from Settings, not at
-  // boot, so its template, icons, and strings stay off the startup chunk.
-  // A rejected chunk must stay visible: the overlay is already open, so the
-  // shell renders a recoverable failure instead of an empty dialog frame.
-  readonly devicePairSetup = createLazyRenderer(() =>
-    import("../pages/devices/view-pairing.tsx").then((module) => module.DevicePairSetup),
-  );
   private readonly shellNavigation = new ShellNavigationOwner(this);
   private readonly shellChrome = new ShellChromeOwner(this);
   private readonly shellGateway = new ShellGatewayOwner(this);
@@ -451,14 +429,6 @@ export class ShellOwner
   private readonly handleGatewayEvent = this.shellGateway.handleGatewayEvent.bind(
     this.shellGateway,
   );
-
-  readonly handleThemeChange = (event: CustomEvent<ThemeModeChangeDetail>) => {
-    const context = this.context;
-    if (!context) {
-      return;
-    }
-    context.theme.setMode(event.detail.mode, event.detail.element);
-  };
 
   async handleSettingsSearchQueryChange(nextQuery: string): Promise<void> {
     this.settingsSearchQuery = nextQuery;

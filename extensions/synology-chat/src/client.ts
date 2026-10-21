@@ -116,6 +116,15 @@ const ChatUserListResponseSchema = z.object({
     .optional(),
 });
 
+const ChatPostResponseSchema = z.object({
+  success: z.boolean(),
+  data: z
+    .object({ succ: z.object({ user_id_post_map: z.record(z.string(), z.unknown()) }) })
+    .optional()
+    // Malformed identity metadata must not hide an explicit rejection.
+    .catch(undefined),
+});
+
 // Cache user lists per bot endpoint to avoid cross-account bleed.
 const chatUserCache = new Map<string, ChatUserCacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -199,11 +208,10 @@ export async function sendHostedFileUrl(
 
   let initiated = false;
   try {
-    const result = await effect.initiate(() => {
+    return await effect.initiate(() => {
       initiated = true;
       return doPost(incomingUrl, body, allowInsecureSsl, userId);
     });
-    return result;
   } catch (error) {
     if (!initiated) {
       throw error;
@@ -314,18 +322,11 @@ export async function resolveLegacyWebhookNameToChatUserId(params: {
 }
 
 function buildWebhookBody(payload: ChatWebhookPayload, userId?: string): string {
-  const numericId = parseNumericUserId(userId);
+  const numericId = parseStrictNonNegativeInteger(userId);
   if (numericId !== undefined) {
     payload.user_ids = [numericId];
   }
   return `payload=${encodeURIComponent(JSON.stringify(payload))}`;
-}
-
-function parseNumericUserId(userId?: string): number | undefined {
-  if (userId === undefined) {
-    return undefined;
-  }
-  return parseStrictNonNegativeInteger(userId);
 }
 
 type SynologyResponse = { statusCode?: number; data: Buffer };
@@ -429,24 +430,14 @@ async function doPost(
   if (!response) {
     return { status: "not-dispatched" };
   }
-  const result = safeParseJsonWithSchema(
-    ChatUserListResponseSchema.pick({ success: true }),
-    response.data.toString("utf8"),
-  );
+  const result = safeParseJsonWithSchema(ChatPostResponseSchema, response.data.toString("utf8"));
   if (response.statusCode === 200) {
     if (result?.success === false) {
       return { status: "rejected" };
     }
-    const envelope = safeParseJsonWithSchema(
-      z.object({
-        success: z.literal(true),
-        data: z.object({ succ: z.object({ user_id_post_map: z.record(z.string(), z.unknown()) }) }),
-      }),
-      response.data.toString("utf8"),
-    );
-    const recipient = parseNumericUserId(userId);
+    const recipient = parseStrictNonNegativeInteger(userId);
     const postId =
-      recipient === undefined ? undefined : envelope?.data.succ.user_id_post_map[String(recipient)];
+      recipient === undefined ? undefined : result?.data?.succ.user_id_post_map[String(recipient)];
     const id = safeParseWithSchema(
       z.union([
         z.number().int().positive().max(Number.MAX_SAFE_INTEGER),

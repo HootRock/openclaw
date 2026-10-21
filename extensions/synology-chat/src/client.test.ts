@@ -232,6 +232,34 @@ describe("Synology Chat TLS verification defaults", () => {
 describe("sendMessage", () => {
   installFakeTimerHarness();
 
+  it.each([
+    { recipient: "123456", postId: 25769804017, ids: ["25769804017"] },
+    { recipient: "123456", postId: "18446744073709551615", ids: ["18446744073709551615"] },
+    { recipient: "999999", postId: 25769804017, ids: [] },
+    { recipient: "123456", postId: 9007199254740992, ids: [] },
+    { recipient: "123456", postId: 0, ids: [] },
+    { recipient: "123456", postId: "invalid", ids: [] },
+  ])(
+    "keeps only usable post IDs for the requested recipient: $recipient/$postId",
+    async ({ recipient, postId, ids }) => {
+      mockResponse(
+        200,
+        JSON.stringify({
+          success: true,
+          data: { succ: { user_id_post_map: { [recipient]: postId } } },
+        }),
+      );
+
+      await expect(sendText("Hello", "123456")).resolves.toEqual({ messageIds: ids });
+    },
+  );
+
+  it("preserves explicit rejection when identity metadata is malformed", async () => {
+    mockResponse(200, JSON.stringify({ success: false, data: { succ: null } }));
+
+    await expect(sendText("Hello", "123456")).resolves.toBe(false);
+  });
+
   it("preserves acknowledged chunks when a later chunk is rejected", async () => {
     let requests = 0;
     vi.mocked(https.request).mockImplementation(((_url, _options, callback) => {
