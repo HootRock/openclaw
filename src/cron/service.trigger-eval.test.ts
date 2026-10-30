@@ -5,12 +5,19 @@ import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-cloc
 import { readCronRunHistoryPageForTests } from "./run-history.test-support.js";
 import type { CronEvent } from "./service.js";
 import { CronService } from "./service.js";
-import { setupCronServiceSuite, writeCronStoreSnapshot } from "./service.test-harness.js";
+import {
+  createCronServiceWithStateForTest,
+  setupCronServiceSuite,
+  writeCronStoreSnapshot,
+} from "./service.test-harness.js";
 import { createCronRunHandle, finishCronRun } from "./service/run-history.js";
+import { waitForCronRunQueue } from "./service/run-queue.js";
+import { captureCronSchedulerWakeForTest } from "./service/scheduler-actor.test-support.js";
 import { createCronServiceState, type CronServiceDeps } from "./service/state.js";
 import { loadCronStore } from "./store.js";
 import { cronStoreKey } from "./store/key.js";
 import { inspectActiveCronRunReceipt } from "./store/run-receipt-store.test-support.js";
+import { createCronScriptRuntime } from "./trigger-script.js";
 import type { CronJobCreate } from "./types.js";
 
 const { logger, makeStorePath } = setupCronServiceSuite({ prefix: "cron-trigger-eval-" });
@@ -94,8 +101,10 @@ async function createHarness(
     },
   };
   const beforeStop: Array<() => Promise<unknown>> = [];
+  const { cron, state } = createCronServiceWithStateForTest(deps);
   const h = {
-    cron: new CronService(deps),
+    cron,
+    state,
     deps,
     enqueueSystemEvent,
     runSessionEvent,
@@ -358,6 +367,63 @@ describe("cron trigger evaluation", () => {
       }
     },
   );
+
+  it("retries a capacity-rejected condition before its next hourly occurrence", async () => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    let active = 0;
+    const runtime = createCronScriptRuntime({
+      config: {},
+      prepareRuntime: async ({ runtimeConfig, jobId }) => ({
+        context: { config: runtimeConfig, agentId: "main", sessionKey: `cron:${jobId}` },
+        createTools: async () => [],
+        scheduledToolPolicy: undefined,
+      }),
+      runHeadless: async () => {
+        if (++active === 3) {
+          entered.resolve();
+        }
+        await release.promise;
+        return { status: "completed", value: { fire: false }, output: [], toolCallCount: 0 };
+      },
+    });
+    const { result: h, wake } = await captureCronSchedulerWakeForTest(() =>
+      createHarness({ evaluateCronTrigger: runtime.evaluateTrigger }),
+    );
+    h.cron.pauseScheduling();
+    const jobs = [];
+    for (let index = 0; index < 4; index++) {
+      jobs.push(
+        await h.cron.add(
+          watcher({
+            name: `capacity watcher ${index}`,
+            schedule: { kind: "cron", expr: "0 * * * *", tz: "UTC", staggerMs: 0 },
+          }),
+        ),
+      );
+    }
+    const dueAt = jobs[0]!.state.nextRunAtMs!;
+    vi.setSystemTime(dueAt);
+    const running = jobs.slice(0, 3).map((job) => h.cron.run(job.id, "due"));
+    try {
+      await entered.promise;
+      const fourth = jobs[3]!;
+      await h.cron.run(fourth.id, "due");
+      expectUnevaluated(h.cron.getJob(fourth.id));
+      release.resolve();
+      await Promise.all(running);
+      expect(h.cron.getJob(fourth.id)!.state.nextRunAtMs!).toBeLessThan(dueAt + 60_000);
+      vi.setSystemTime(dueAt + 2_000);
+      h.cron.resumeScheduling();
+      await wake(h.state);
+      await waitForCronRunQueue(h.state);
+      expect(h.cron.getJob(fourth.id)?.state.triggerEvalCount).toBe(1);
+      expect(h.runIsolatedAgentJob).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await Promise.all(running);
+    }
+  });
 
   it("persists quiet evaluations and fires replacement triggers with fresh state", async () => {
     const replacementScript = 'return "replacement"';
@@ -666,7 +732,6 @@ describe("cron trigger cadence", () => {
   it.each([
     { name: "quiet immediate-wake", wakeMode: "now", result: evaluated(false) },
     { name: "fired", wakeMode: "next-heartbeat", result: evaluated(true) },
-    { name: "busy", wakeMode: "next-heartbeat", result: { kind: "busy" } },
   ] as const)(
     "preserves the $name interval through maintenance and restart",
     async ({ result, wakeMode }) => {
@@ -691,6 +756,38 @@ describe("cron trigger cadence", () => {
       expect(evaluate).toHaveBeenCalledTimes(2);
     },
   );
+
+  it("preserves unevaluated busy occurrences through maintenance and restart", async () => {
+    let busy = true;
+    const { h, evaluate } = await createCadence(() => (busy ? { kind: "busy" } : evaluated(false)));
+    h.cron.pauseScheduling();
+    const job = await h.cron.add(
+      mainWatcher("deferred condition", {
+        schedule: { kind: "cron", expr: "0 * * * *", tz: "UTC", staggerMs: 0 },
+        state: { triggerState: { owner: "previous evaluation" } },
+      }),
+    );
+    const dueAt = job.state.nextRunAtMs!;
+    vi.setSystemTime(dueAt);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await h.cron.run(job.id, "due");
+      expectUnevaluated(h.cron.getJob(job.id));
+      expect(h.cron.getJob(job.id)?.state.triggerState).toEqual({ owner: "previous evaluation" });
+      expect(h.cron.getJob(job.id)?.state.nextRunAtMs).toBe(dueAt);
+    }
+    h.cron.stop();
+    h.deps.cronEnabled = false;
+    await h.restart(Date.now() + 10_000);
+    expect((await h.cron.readJob(job.id))?.state.nextRunAtMs).toBe(dueAt);
+    expect((await h.cron.list())[0]?.state.nextRunAtMs).toBe(dueAt);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    busy = false;
+    await h.cron.run(job.id, "due");
+    expect(h.cron.getJob(job.id)?.state.triggerEvalCount).toBe(1);
+    expect(h.cron.getJob(job.id)?.state.nextRunAtMs).toBe(dueAt + 3_600_000);
+    expect(h.runSessionEvent).not.toHaveBeenCalled();
+    expect(readHistory(h.storePath, job.id)).toEqual([]);
+  });
 
   it("defers an expired quiet immediate-wake occurrence without reevaluating it at startup", async () => {
     const { h, evaluate } = await createCadence(() => evaluated(false, { state: { count: 1 } }));

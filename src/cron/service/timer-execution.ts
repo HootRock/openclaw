@@ -283,8 +283,13 @@ export async function executeJobCore(
       if (evaluation.kind === "busy") {
         state.deps.log.debug({ jobId: job.id }, "cron: trigger evaluation skipped while busy");
         return {
-          status: "ok",
-          triggerEval: { fired: false, stateChanged: false, busy: true },
+          status: "skipped",
+          summary: "Condition check deferred while trigger evaluation is busy",
+          admissionDeferred: true,
+          admissionDeferredReason: "busy",
+          executionStarted: false,
+          delivered: false,
+          deliveryAttempted: false,
         };
       }
       if (evaluation.kind === "error") {
